@@ -474,39 +474,46 @@ def solve_assignments(
     assignment with a smaller maximum would have been feasible at the
     previous cap).  Reads occupy bits from the most significant end, so
     integer order is the lexicographic order of group labels.
+
+    The DP keeps up to ``limit`` distinct ``(cost, bits)`` pairs per state
+    rather than a single best one: when the group lower bounds force only a
+    *number* of reads onto the dearer side (e.g. exactly one of several
+    equally-priced neutral reads must join group 1), every such assignment
+    lands in the same ``(count, max-mm)`` state; keeping just one code would
+    silently discard the tied explanations.  K-best prefixes suffice because
+    every edge out of a state is identical regardless of how the state was
+    reached, so the K smallest codes extending the K smallest prefixes give
+    the K smallest complete codes.
     """
     n = len(m0)
-    # state: (group0 count, max-mm group0, max-mm group1) -> (cost, bits)
-    dp: dict[tuple[int, int, int], tuple[int, int]] = {(0, 0, 0): (0, 0)}
+    # state: (group0 count, max-mm group0, max-mm group1) -> sorted [(cost, bits)]
+    dp: dict[tuple[int, int, int], list[tuple[int, int]]] = {(0, 0, 0): [(0, 0)]}
 
     for i in range(n):
         bit = 1 << (n - 1 - i)
         can0 = f0[i] and m0[i] <= cap
         can1 = f1[i] and m1[i] <= cap
-        nxt: dict[tuple[int, int, int], tuple[int, int]] = {}
-        for (cnt, mx0, mx1), (tot, assign) in dp.items():
-            if can0:
-                t = tot + c0[i]
-                if t <= target_cost:
-                    key = (cnt + 1, max(mx0, m0[i]), mx1)
-                    val = (t, assign)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-            if can1:
-                t = tot + c1[i]
-                if t <= target_cost:
-                    key = (cnt, mx0, max(mx1, m1[i]))
-                    val = (t, assign | bit)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-        dp = nxt
+        buckets: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
+        for (cnt, mx0, mx1), pairs in dp.items():
+            key0 = (cnt + 1, max(mx0, m0[i]), mx1) if can0 else None
+            key1 = (cnt, mx0, max(mx1, m1[i])) if can1 else None
+            for tot, assign in pairs:
+                if can0:
+                    ntot = tot + c0[i]
+                    if ntot <= target_cost:
+                        buckets.setdefault(key0, []).append((ntot, assign))  # type: ignore[arg-type]
+                if can1:
+                    ntot = tot + c1[i]
+                    if ntot <= target_cost:
+                        buckets.setdefault(key1, []).append((ntot, assign | bit))  # type: ignore[arg-type]
+        dp = {key: sorted(cands)[:limit] for key, cands in buckets.items()}
 
     finals: list[tuple[int, int]] = []  # (bits, max mm)
-    for (cnt, mx0, mx1), (tot, assign) in dp.items():
-        if tot == target_cost and 2 <= cnt <= n - 2:
-            finals.append((assign, max(mx0, mx1)))
+    for (cnt, mx0, mx1), pairs in dp.items():
+        if 2 <= cnt <= n - 2:
+            for tot, assign in pairs:
+                if tot == target_cost:
+                    finals.append((assign, max(mx0, mx1)))
     finals.sort()
     return [(mx, bits) for bits, mx in finals[:limit]]
 
@@ -643,48 +650,54 @@ def solve_assignments_contaminant(
     digits ``0`` (haplotype), ``1`` (complement) and ``2`` (contaminant), so
     integer order is exactly the required three-way lexicographic order.
     Returns ``(max non-contaminant mismatches, ternary code)`` pairs.
+
+    As in the legacy exact DP, up to ``limit`` distinct ``(cost, code)``
+    pairs are retained per state: the group lower bounds can force only a
+    *count* of reads (e.g. exactly one of several tied flexible reads must
+    join the complement group while the contaminant quota is already full),
+    and every such explanation then shares one state -- a single best code
+    would hide genuinely distinct three-way optima.  Edge availability from a
+    state depends on neither the code nor the cost, so equal-cost prefixes
+    extend identically and their lexicographic order is preserved; the K
+    smallest codes through a state come from the K smallest prefixes.
     """
     n = len(m0)
     pow3 = [3 ** (n - 1 - i) for i in range(n)]
     # state: (group0 count, contaminant count, max-mm g0, max-mm g1)
-    dp: dict[tuple[int, int, int, int], tuple[int, int]] = {(0, 0, 0, 0): (0, 0)}
+    dp: dict[tuple[int, int, int, int], list[tuple[int, int]]] = {
+        (0, 0, 0, 0): [(0, 0)]
+    }
 
     for i in range(n):
         digit = pow3[i]
         edge0 = f0[i] and m0[i] <= cap
         edge1 = f1[i] and m1[i] <= cap
-        nxt: dict[tuple[int, int, int, int], tuple[int, int]] = {}
-        for (cnt, tcnt, mx0, mx1), (tot, code) in dp.items():
-            if edge0:
-                ntot = tot + c0[i]
-                if ntot <= target_cost:
-                    key = (cnt + 1, tcnt, max(mx0, m0[i]), mx1)
-                    val = (ntot, code)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-            if edge1:
-                ntot = tot + c1[i]
-                if ntot <= target_cost:
-                    key = (cnt, tcnt, mx0, max(mx1, m1[i]))
-                    val = (ntot, code + digit)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-            if tcnt < q:  # contaminant: no allowance cap, digit 2
-                ntot = tot + penalties[i]
-                if ntot <= target_cost:
-                    key = (cnt, tcnt + 1, mx0, mx1)
-                    val = (ntot, code + 2 * digit)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-        dp = nxt
+        buckets: dict[tuple[int, int, int, int], list[tuple[int, int]]] = {}
+        for (cnt, tcnt, mx0, mx1), pairs in dp.items():
+            key0 = (cnt + 1, tcnt, max(mx0, m0[i]), mx1) if edge0 else None
+            key1 = (cnt, tcnt, mx0, max(mx1, m1[i])) if edge1 else None
+            key2 = (cnt, tcnt + 1, mx0, mx1) if tcnt < q else None
+            for tot, code in pairs:
+                if edge0:
+                    ntot = tot + c0[i]
+                    if ntot <= target_cost:
+                        buckets.setdefault(key0, []).append((ntot, code))  # type: ignore[arg-type]
+                if edge1:
+                    ntot = tot + c1[i]
+                    if ntot <= target_cost:
+                        buckets.setdefault(key1, []).append((ntot, code + digit))  # type: ignore[arg-type]
+                if key2 is not None:
+                    ntot = tot + penalties[i]
+                    if ntot <= target_cost:
+                        buckets.setdefault(key2, []).append((ntot, code + 2 * digit))
+        dp = {key: sorted(cands)[:limit] for key, cands in buckets.items()}
 
     finals: list[tuple[int, int]] = []  # (ternary code, max mm)
-    for (cnt, tcnt, mx0, mx1), (tot, code) in dp.items():
-        if tot == target_cost and cnt >= 2 and cnt + tcnt <= n - 2:
-            finals.append((code, max(mx0, mx1)))
+    for (cnt, tcnt, mx0, mx1), pairs in dp.items():
+        if cnt >= 2 and cnt + tcnt <= n - 2:
+            for tot, code in pairs:
+                if tot == target_cost:
+                    finals.append((code, max(mx0, mx1)))
     finals.sort()
     return [(mx, code) for code, mx in finals[:limit]]
 

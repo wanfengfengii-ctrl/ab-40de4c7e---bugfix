@@ -314,6 +314,53 @@ def test_three_way_tie_digit_order():
 
 
 # --------------------------------------------------------------------------
+# count-forced three-way ties (group lower bound, contaminant quota full)
+# --------------------------------------------------------------------------
+
+
+def test_three_way_count_forced_tie_when_capacity_exhausted():
+    """Tied flexible reads split by a group bound must not collapse to one.
+
+    Ten full-span reads against haplotype H: one read can join only the
+    haplotype group, one only the complement group, four are forced
+    contaminants (exhausting ``max_contaminant_reads=4``), and four flexible
+    reads can join either group (cost 4 vs H, cost 8 vs C).  Each group
+    needs two non-contaminant reads, so exactly one flexible read must join
+    the complement group -- four equally optimal assignments exist.  The
+    canonical first two must be returned with ``unique=false``.
+    """
+    hap = [0, 1, 1, 0, 1, 0, 0, 1]
+    comp = [1 - b for b in hap]
+    forced = hap[:4] + comp[4:]
+    flex_obs = comp[:4] + hap[4:]
+    flex_costs = [1, 1, 1, 1, 2, 2, 2, 2]
+
+    reads = [
+        make_read("h0", 0, 8, hap, costs=[1] * 8, allow=0, penalty=100),
+        make_read("c0", 0, 8, comp, costs=[1] * 8, allow=0, penalty=100),
+    ]
+    for i in range(4):
+        reads.append(make_read(f"x{i}", 0, 8, forced, costs=[1] * 8, allow=0, penalty=1))
+    for i in range(4):
+        reads.append(make_read(f"f{i}", 0, 8, flex_obs, costs=flex_costs, allow=4, penalty=100))
+
+    out = phase({"n_sites": 8, "reads": reads, "max_contaminant_reads": 4})
+    assert out["unique"] is False
+    s1, s2 = out["solutions"]
+    assert s1["haplotype"] == s2["haplotype"] == hap
+    assert s1["assignments"] == [0, 1, 2, 2, 2, 2, 0, 0, 0, 1]
+    assert s2["assignments"] == [0, 1, 2, 2, 2, 2, 0, 0, 1, 0]
+    for s in (s1, s2):
+        assert s["total_objective_cost"] == 24
+        assert s["total_mismatch_cost"] + s["total_contaminant_penalty"] == 24
+        assert s["total_contaminant_penalty"] == 4
+        assert s["max_per_read_mismatches"] == 4
+        assert s["contaminant_count"] == 4
+        assert len(s["groups"]["haplotype"]) == 4
+        assert len(s["groups"]["complement"]) == 2
+
+
+# --------------------------------------------------------------------------
 # validation / legacy compatibility
 # --------------------------------------------------------------------------
 

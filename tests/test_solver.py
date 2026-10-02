@@ -277,6 +277,41 @@ def test_ambiguous_two_assignments_under_one_haplotype():
 
 
 # --------------------------------------------------------------------------
+# count-forced ambiguity: the group bound fixes only a *number* of reads
+# --------------------------------------------------------------------------
+
+
+def test_ambiguous_count_forced_neutral_split():
+    """A group bound forcing exactly one of several neutral reads still ties.
+
+    Five reads support only the haplotype group (allowance 0), one only the
+    complement group, and four identical reads can join either group at the
+    same mismatch cost.  Each group needs two members, so exactly one of the
+    four flexible reads must join the complement group: four equally optimal
+    assignments exist.  The exact assignment DP must not collapse them into a
+    single state and report a unique solution.
+    """
+    n_sites = 8
+    hap = [0, 1, 1, 0, 1, 0, 0, 1]
+    comp = [1 - b for b in hap]
+    flex_obs = comp[:4] + hap[4:]
+    reads = [make_read(f"a{i}", 0, 8, hap, costs=[1] * 8, allow=0) for i in range(5)]
+    reads.append(make_read("b0", 0, 8, comp, costs=[1] * 8, allow=0))
+    for i in range(4):
+        reads.append(make_read(f"n{i}", 0, 8, flex_obs, costs=[1] * 8, allow=4))
+
+    out = phase({"n_sites": n_sites, "reads": reads})
+    assert out["unique"] is False
+    s1, s2 = out["solutions"]
+    assert s1["haplotype"] == s2["haplotype"] == hap
+    assert s1["assignments"] == [0, 0, 0, 0, 0, 1, 0, 0, 0, 1]
+    assert s2["assignments"] == [0, 0, 0, 0, 0, 1, 0, 0, 1, 0]
+    for s in (s1, s2):
+        assert s["total_mismatch_cost"] == 16
+        assert s["max_per_read_mismatches"] == 4
+
+
+# --------------------------------------------------------------------------
 # error paths
 # --------------------------------------------------------------------------
 
