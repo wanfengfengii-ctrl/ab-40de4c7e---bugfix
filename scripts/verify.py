@@ -151,6 +151,40 @@ def contaminant_capacity_sample():
     return {"n_sites": 8, "reads": reads, "max_contaminant_reads": 1}
 
 
+def contaminant_floor_tie_sample():
+    """Exhausted contaminant cap plus group floors => four tied explanations.
+
+    One read can only join the haplotype group, one only the complement
+    group, four must be contaminant (exactly exhausting the cap of four),
+    and four flexible reads cost 4 vs the haplotype and 8 vs the
+    complement.  Each group still needs two non-contaminant reads, so
+    exactly one flexible read must take the dearer complement side: four
+    equally optimal three-way assignments.
+    """
+    hap = [0, 1, 1, 0, 1, 0, 0, 1]
+    comp = [1 - b for b in hap]
+
+    def full_read(rid, obs, allow, costs, penalty):
+        return make_read(rid, 0, 8, obs, costs=costs, allow=allow, penalty=penalty)
+
+    reads = [
+        full_read("r0", hap, 0, [1] * 8, 100),
+        full_read("r1", comp, 0, [1] * 8, 100),
+    ]
+    for j, flipped in enumerate((
+        [1, 1, 1, 0, 1, 0, 0, 1],
+        [0, 0, 1, 0, 1, 0, 0, 1],
+        [0, 1, 0, 0, 1, 0, 0, 1],
+        [0, 1, 1, 1, 1, 0, 0, 1],
+    )):
+        reads.append(full_read(f"r{j + 2}", flipped, 0, [9] * 8, 1))
+    flex_obs = [1, 0, 0, 1, 1, 0, 0, 1]
+    flex_costs = [1, 1, 1, 1, 2, 2, 2, 2]
+    for j in range(4):
+        reads.append(full_read(f"r{j + 6}", flex_obs, 4, flex_costs, 100))
+    return {"n_sites": 8, "reads": reads, "max_contaminant_reads": 4}
+
+
 # --------------------------------------------------------------------------
 # tiny HTTP client
 # --------------------------------------------------------------------------
@@ -320,6 +354,33 @@ def smoke() -> list[str]:
             f"body {body}",
         )
 
+    def case_contaminant_floor_tie():
+        status, body = request("POST", "/api/phase", contaminant_floor_tie_sample())
+        check(status == 200, f"status {status}, body {body}")
+        data = body["data"]
+        check(data["unique"] is False, "four equal-optimum explanations must be ambiguous")
+        sols = data["solutions"]
+        check(len(sols) == 2, f"expected the first two of four tied solutions, got {len(sols)}")
+        s1, s2 = sols
+        check(
+            s1["assignments"] == [0, 1, 2, 2, 2, 2, 0, 0, 0, 1],
+            f"first solution {s1['assignments']}",
+        )
+        check(
+            s2["assignments"] == [0, 1, 2, 2, 2, 2, 0, 0, 1, 0],
+            f"second solution {s2['assignments']}",
+        )
+        for s in sols:
+            check(s["total_objective_cost"] == 24, f"objective {s['total_objective_cost']}")
+            check(s["max_per_read_mismatches"] == 4, "cap objective")
+            check(s["contaminant_count"] == 4, "cap exactly exhausted")
+            check(len(s["groups"]["haplotype"]) >= 2, "haplotype group size")
+            check(len(s["groups"]["complement"]) >= 2, "complement group size")
+        check(
+            [len(s["groups"]["complement"]) for s in sols] == [2, 2],
+            "exactly one flexible read is forced to the complement side",
+        )
+
     def case_contaminant_validation():
         # cap present without per-read penalties
         payload = contaminant_sample()
@@ -354,6 +415,7 @@ def smoke() -> list[str]:
     run("discontinuous-coverage business error", case_discontinuous)
     run("invalid input rejected", case_invalid)
     run("contaminant sample (joint three-way phasing)", case_contaminant)
+    run("contaminant floor tie (exhausted cap, four equal optima)", case_contaminant_floor_tie)
     run("contaminant capacity business error", case_contaminant_capacity)
     run("contaminant option validation", case_contaminant_validation)
     run("legacy response shape unchanged", case_legacy_shape)

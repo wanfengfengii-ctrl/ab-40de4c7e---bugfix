@@ -318,6 +318,61 @@ def test_three_way_tie_digit_order():
 # --------------------------------------------------------------------------
 
 
+def test_exhausted_cap_and_group_floor_four_way_assignment_tie():
+    """Same-state tied three-way assignments must not collapse to one.
+
+    Ten full-span reads with cap 4: one read can only join the haplotype
+    group, one only the complement group, four must be contaminant (exactly
+    exhausting the cap), and four flexible reads cost 4 vs the haplotype and
+    8 vs the complement.  Each group still needs two non-contaminant reads,
+    so exactly one of the four flexible reads must take the dearer
+    complement side -- four equally optimal explanations sharing one
+    aggregate DP state.  The response must report ambiguity and return the
+    first two canonical three-way assignments.
+    """
+    hap = [0, 1, 1, 0, 1, 0, 0, 1]
+    comp = [1 - b for b in hap]
+
+    def full_read(rid, obs, allow, costs, penalty):
+        return make_read(rid, 0, 8, obs, costs=costs, allow=allow, penalty=penalty)
+
+    reads = [
+        full_read("r0", hap, 0, [1] * 8, 100),
+        full_read("r1", comp, 0, [1] * 8, 100),
+    ]
+    for j, flipped in enumerate((
+        [1, 1, 1, 0, 1, 0, 0, 1],
+        [0, 0, 1, 0, 1, 0, 0, 1],
+        [0, 1, 0, 0, 1, 0, 0, 1],
+        [0, 1, 1, 1, 1, 0, 0, 1],
+    )):
+        reads.append(full_read(f"r{j + 2}", flipped, 0, [9] * 8, 1))
+    flex_obs = [1, 0, 0, 1, 1, 0, 0, 1]
+    flex_costs = [1, 1, 1, 1, 2, 2, 2, 2]
+    for j in range(4):
+        reads.append(full_read(f"r{j + 6}", flex_obs, 4, flex_costs, 100))
+
+    out = phase({"n_sites": 8, "reads": reads, "max_contaminant_reads": 4})
+    assert out["unique"] is False
+    s1, s2 = out["solutions"]
+    assert s1["assignments"] == [0, 1, 2, 2, 2, 2, 0, 0, 0, 1]
+    assert s2["assignments"] == [0, 1, 2, 2, 2, 2, 0, 0, 1, 0]
+    for s in (s1, s2):
+        assert s["total_objective_cost"] == 24
+        assert s["total_mismatch_cost"] == 20
+        assert s["total_contaminant_penalty"] == 4
+        assert s["max_per_read_mismatches"] == 4
+        assert s["contaminant_count"] == 4
+        assert s["contaminant_reads"] == ["r2", "r3", "r4", "r5"]
+        assert len(s["groups"]["haplotype"]) >= 2
+        assert len(s["groups"]["complement"]) >= 2
+    # exactly one flexible read is forced to the complement side in every
+    # optimum, so the group sizes are fixed even though which read moves
+    # differs among the four explanations
+    for s in (s1, s2):
+        assert (len(s["groups"]["haplotype"]), len(s["groups"]["complement"])) == (4, 2)
+
+
 def test_cap_validation():
     reads, _ = clean_reads(penalty=1)
 

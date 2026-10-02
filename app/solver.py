@@ -451,7 +451,119 @@ def feasible_under_cap(
     return winners
 
 
-# ----- exact assignment DP for reported candidates (legacy path) ------------
+# ----- exact assignment enumeration for reported candidates -----------------
+
+
+def _lex_optimal_assignments(
+    edge_cost,
+    n: int,
+    initial_state,
+    final_states,
+    digits,
+    state_grid,
+    target_cost: int,
+    limit: int = 2,
+):
+    """First ``limit`` lexicographic assignments reaching ``target_cost``.
+
+    A collapsing forward DP that keeps one prefix per aggregate state loses
+    distinct tied assignments whenever they merge into the same state (the
+    group floors pinning the group counts is the typical case).  Instead a
+    backward DP stores, for every step and state, the *minimum* cost-to-go of
+    a suffix that ends in a valid final state; a prefix is then extendable to
+    an optimum exactly when
+
+        prefix_cost + edge_cost + min_cost_to_go == target_cost
+
+    (strict equality holds because no complete valid assignment can cost less
+    than the global optimum ``target_cost``).  Walking edges in digit order and
+    always taking the smallest extendable digit yields the lexicographically
+    smallest optimum; its immediate successor is found by diverging at the
+    rightmost position that admits a larger extendable digit and again taking
+    the smallest suffix thereafter.
+
+    ``edge_cost(i, state, digit)`` returns ``(added_cost, next_state)`` for a
+    usable edge, else ``None``.  ``state_grid(i)`` enumerates the states that
+    can exist just before read ``i``.
+    """
+    # Backward minimum cost-to-go; absent states are infeasible.
+    to_go = [None] * (n + 1)
+    to_go[n] = dict.fromkeys(final_states, 0)
+    for i in range(n - 1, -1, -1):
+        cur: dict = {}
+        nxt_costs = to_go[i + 1]
+        for state in state_grid(i):
+            best: int | None = None
+            for d in digits:
+                edge = edge_cost(i, state, d)
+                if edge is None:
+                    continue
+                added, nxt = edge
+                tail = nxt_costs.get(nxt)
+                if tail is None:
+                    continue
+                total = added + tail
+                if best is None or total < best:
+                    best = total
+            if best is not None:
+                cur[state] = best
+        to_go[i] = cur
+
+    def extend(seed: list[int], start: int, state, cost: int):
+        """Greedily append the smallest extendable suffix; ``None`` if stuck."""
+        labels = list(seed)
+        for i in range(start, n):
+            found = None
+            for d in digits:
+                edge = edge_cost(i, state, d)
+                if edge is None:
+                    continue
+                added, nxt = edge
+                tail = to_go[i + 1].get(nxt)
+                if tail is not None and cost + added + tail == target_cost:
+                    found = (d, added, nxt)
+                    break
+            if found is None:
+                return None
+            d, added, state = found
+            cost += added
+            labels.append(d)
+        return labels if cost == target_cost else None
+
+    first = extend([], 0, initial_state, 0)
+    if first is None:
+        return []
+
+    def successor(path):
+        """Immediate lexicographic optimal successor of ``path`` if any."""
+        for i in range(n - 1, -1, -1):
+            state = initial_state
+            cost = 0
+            for j in range(i):
+                edge = edge_cost(j, state, path[j])
+                assert edge is not None
+                added, state = edge
+                cost += added
+            for d in digits:
+                if d <= path[i]:
+                    continue
+                edge = edge_cost(i, state, d)
+                if edge is None:
+                    continue
+                added, nxt = edge
+                tail = to_go[i + 1].get(nxt)
+                if tail is None or cost + added + tail != target_cost:
+                    continue
+                return extend(path[:i] + [d], i + 1, nxt, cost + added)
+        return None
+
+    results = [first]
+    while len(results) < limit:
+        nxt = successor(results[-1])
+        if nxt is None:
+            break
+        results.append(nxt)
+    return results
 
 
 def solve_assignments(
@@ -469,46 +581,36 @@ def solve_assignments(
 
     Every returned pair ``(actual max mismatches, assignment bits)`` reaches
     ``target_cost`` with every read mismatching at most ``cap`` and both
-    groups populated.  When ``cap`` is the optimal secondary-objective value,
+    groups populated.  ``cap`` is the optimal secondary-objective value, so
     each returned assignment has max mismatches exactly ``cap`` (an
     assignment with a smaller maximum would have been feasible at the
     previous cap).  Reads occupy bits from the most significant end, so
     integer order is the lexicographic order of group labels.
     """
     n = len(m0)
-    # state: (group0 count, max-mm group0, max-mm group1) -> (cost, bits)
-    dp: dict[tuple[int, int, int], tuple[int, int]] = {(0, 0, 0): (0, 0)}
 
-    for i in range(n):
-        bit = 1 << (n - 1 - i)
-        can0 = f0[i] and m0[i] <= cap
-        can1 = f1[i] and m1[i] <= cap
-        nxt: dict[tuple[int, int, int], tuple[int, int]] = {}
-        for (cnt, mx0, mx1), (tot, assign) in dp.items():
-            if can0:
-                t = tot + c0[i]
-                if t <= target_cost:
-                    key = (cnt + 1, max(mx0, m0[i]), mx1)
-                    val = (t, assign)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-            if can1:
-                t = tot + c1[i]
-                if t <= target_cost:
-                    key = (cnt, mx0, max(mx1, m1[i]))
-                    val = (t, assign | bit)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-        dp = nxt
+    def edge_cost(i, state, digit):
+        (cnt,) = state
+        if digit == 0 and f0[i] and m0[i] <= cap:
+            return c0[i], (cnt + 1,)
+        if digit == 1 and f1[i] and m1[i] <= cap:
+            return c1[i], (cnt,)
+        return None
 
-    finals: list[tuple[int, int]] = []  # (bits, max mm)
-    for (cnt, mx0, mx1), (tot, assign) in dp.items():
-        if tot == target_cost and 2 <= cnt <= n - 2:
-            finals.append((assign, max(mx0, mx1)))
-    finals.sort()
-    return [(mx, bits) for bits, mx in finals[:limit]]
+    labels_list = _lex_optimal_assignments(
+        edge_cost,
+        n,
+        initial_state=(0,),
+        final_states=[(cnt,) for cnt in range(2, n - 1)],
+        digits=(0, 1),
+        state_grid=lambda i: ((cnt,) for cnt in range(i + 1)),
+        target_cost=target_cost,
+        limit=limit,
+    )
+    return [
+        (cap, sum(digit << (n - 1 - i) for i, digit in enumerate(labels)))
+        for labels in labels_list
+    ]
 
 
 # ----- contaminant-mode joint DP --------------------------------------------
@@ -643,50 +745,50 @@ def solve_assignments_contaminant(
     digits ``0`` (haplotype), ``1`` (complement) and ``2`` (contaminant), so
     integer order is exactly the required three-way lexicographic order.
     Returns ``(max non-contaminant mismatches, ternary code)`` pairs.
+
+    Tied assignments that share an aggregate state (in particular when the
+    group floors pin the group counts) are enumerated via the backward
+    cost-to-go scheme in :func:`_lex_optimal_assignments` rather than
+    collapsed into a single prefix.  At the optimal cap every optimum has an
+    actual per-read mismatch maximum exactly equal to ``cap``.
     """
     n = len(m0)
     pow3 = [3 ** (n - 1 - i) for i in range(n)]
-    # state: (group0 count, contaminant count, max-mm g0, max-mm g1)
-    dp: dict[tuple[int, int, int, int], tuple[int, int]] = {(0, 0, 0, 0): (0, 0)}
 
-    for i in range(n):
-        digit = pow3[i]
-        edge0 = f0[i] and m0[i] <= cap
-        edge1 = f1[i] and m1[i] <= cap
-        nxt: dict[tuple[int, int, int, int], tuple[int, int]] = {}
-        for (cnt, tcnt, mx0, mx1), (tot, code) in dp.items():
-            if edge0:
-                ntot = tot + c0[i]
-                if ntot <= target_cost:
-                    key = (cnt + 1, tcnt, max(mx0, m0[i]), mx1)
-                    val = (ntot, code)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-            if edge1:
-                ntot = tot + c1[i]
-                if ntot <= target_cost:
-                    key = (cnt, tcnt, mx0, max(mx1, m1[i]))
-                    val = (ntot, code + digit)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-            if tcnt < q:  # contaminant: no allowance cap, digit 2
-                ntot = tot + penalties[i]
-                if ntot <= target_cost:
-                    key = (cnt, tcnt + 1, mx0, mx1)
-                    val = (ntot, code + 2 * digit)
-                    old = nxt.get(key)
-                    if old is None or val < old:
-                        nxt[key] = val
-        dp = nxt
+    def edge_cost(i, state, digit):
+        cnt, tcnt = state
+        if digit == 0 and f0[i] and m0[i] <= cap:
+            return c0[i], (cnt + 1, tcnt)
+        if digit == 1 and f1[i] and m1[i] <= cap:
+            return c1[i], (cnt, tcnt)
+        if digit == 2 and tcnt < q:
+            return penalties[i], (cnt, tcnt + 1)
+        return None
 
-    finals: list[tuple[int, int]] = []  # (ternary code, max mm)
-    for (cnt, tcnt, mx0, mx1), (tot, code) in dp.items():
-        if tot == target_cost and cnt >= 2 and cnt + tcnt <= n - 2:
-            finals.append((code, max(mx0, mx1)))
-    finals.sort()
-    return [(mx, code) for code, mx in finals[:limit]]
+    def states_at(i):
+        for cnt in range(i + 1):
+            for tcnt in range(min(i - cnt, q) + 1):
+                yield (cnt, tcnt)
+
+    finals = [
+        (cnt, tcnt)
+        for cnt in range(2, n - 1)
+        for tcnt in range(min(q, n - 2 - cnt) + 1)
+    ]
+    labels_list = _lex_optimal_assignments(
+        edge_cost,
+        n,
+        initial_state=(0, 0),
+        final_states=finals,
+        digits=(0, 1, 2),
+        state_grid=states_at,
+        target_cost=target_cost,
+        limit=limit,
+    )
+    return [
+        (cap, sum(digit * pow3[i] for i, digit in enumerate(labels)))
+        for labels in labels_list
+    ]
 
 
 class _ContaminantInfeasible(Exception):

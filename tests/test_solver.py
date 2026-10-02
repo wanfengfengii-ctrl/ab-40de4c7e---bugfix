@@ -242,6 +242,34 @@ def test_ambiguous_unlinked_components():
 # --------------------------------------------------------------------------
 
 
+def test_ambiguous_floor_forced_same_state_tie():
+    """Tied assignments merging into one exact-DP state are both returned.
+
+    With seven forced group-0 reads, one forced group-1 read and three
+    identical flexible reads that strictly prefer the haplotype side, the
+    group-1 floor forces exactly one flexible read to the dearer
+    complement side.  The three optimal assignments share a single final
+    exact-DP state (group count and both max-mismatch values identical); a
+    collapsing forward DP would report this as unique.
+    """
+    hap = [0, 1, 1, 0, 1, 0, 0, 1]
+    reads = [make_read(f"a{j}", 0, 8, hap, costs=[1] * 8, allow=0) for j in range(7)]
+    reads.append(make_read("b0", 0, 8, [1 - b for b in hap], costs=[1] * 8, allow=0))
+    flex_obs = [1, 0, 1, 0, 1, 0, 0, 1]
+    flex_costs = [1, 1, 8, 1, 8, 8, 8, 8]
+    for j in range(3):
+        reads.append(make_read(f"u{j}", 0, 8, flex_obs, costs=flex_costs, allow=6))
+
+    out = phase({"n_sites": 8, "reads": reads})
+    assert out["unique"] is False
+    s1, s2 = out["solutions"]
+    assert s1["assignments"] == [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1]
+    assert s2["assignments"] == [0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0]
+    assert s1["total_mismatch_cost"] == s2["total_mismatch_cost"] == 45
+    assert s1["max_per_read_mismatches"] == s2["max_per_read_mismatches"] == 6
+    assert s1["haplotype"] == s2["haplotype"] == hap
+
+
 def test_ambiguous_two_assignments_under_one_haplotype():
     """A perfectly neutral read can join either group at equal cost.
 
